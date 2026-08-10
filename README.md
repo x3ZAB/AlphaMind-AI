@@ -15,11 +15,11 @@
 - [x] Telegram Bot
 - [x] `/start`
 - [x] `/help`
-- [ ] Base Provider
-- [ ] Finnhub Provider
-- [ ] First Stock Analysis
+| Finnhub Provider | ✅ |
+| Company API Test | ✅ |
+| Stock Price API Test | ✅ |
+| First Stock Analysis | ⏳ |
 
-### Upcoming
 - [ ] Data Provider Layer
 - [ ] Market Data Pipeline
 - [ ] News Integration
