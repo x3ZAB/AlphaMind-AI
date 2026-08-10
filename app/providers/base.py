@@ -11,3 +11,7 @@ class BaseProvider(ABC):
     @abstractmethod
     async def get_stock_price(self, ticker: str) -> dict[str, Any]:
         pass
+
+    @abstractmethod
+    async def search_company(self, query: str) -> dict[str, Any]:
+        pass

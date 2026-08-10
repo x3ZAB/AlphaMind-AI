@@ -20,7 +20,10 @@ class FinnhubProvider(BaseProvider):
         }
 
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params)
+            response = await client.get(
+                url,
+                params=params,
+            )
 
         response.raise_for_status()
 
@@ -35,7 +38,28 @@ class FinnhubProvider(BaseProvider):
         }
 
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params)
+            response = await client.get(
+                url,
+                params=params,
+            )
+
+        response.raise_for_status()
+
+        return response.json()
+
+    async def search_company(self, query: str) -> dict:
+        url = f"{self.BASE_URL}/search"
+
+        params = {
+            "q": query,
+            "token": self.api_key,
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                params=params,
+            )
 
         response.raise_for_status()
 
