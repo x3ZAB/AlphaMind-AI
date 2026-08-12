@@ -1,7 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Integer, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
+
+if TYPE_CHECKING:
+    from app.models.llm_configuration import UserLLMConfiguration
 
 
 class User(Base):
@@ -23,4 +30,11 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(
         String(100),
         nullable=True,
+    )
+
+    llm_configuration: Mapped[UserLLMConfiguration | None] = relationship(
+        "UserLLMConfiguration",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
     )
