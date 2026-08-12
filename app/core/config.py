@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     FRED_API_KEY: str = ""
     NEWS_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
+    ENCRYPTION_KEY: str
 
     model_config = SettingsConfigDict(
         env_file=".env",
