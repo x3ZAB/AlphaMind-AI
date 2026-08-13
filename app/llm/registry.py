@@ -3,6 +3,7 @@ from collections.abc import Callable
 from app.llm.base import BaseLLMProvider
 from app.llm.errors import UnknownLLMProviderError
 from app.llm.providers.openai import OpenAIProvider
+from app.llm.providers.gemini import GeminiProvider
 
 
 ProviderFactory = Callable[..., BaseLLMProvider]
@@ -18,9 +19,11 @@ class LLMProviderRegistry:
             for name, factory in (
                 providers
                 if providers is not None
-                else {"openai": OpenAIProvider}
+                else {"openai": OpenAIProvider, "gemini": GeminiProvider}
             ).items()
         }
+
+
 
     def register(
         self,
