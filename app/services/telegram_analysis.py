@@ -46,6 +46,7 @@ class TelegramAnalysisService:
             question=request,
             company=stock_data.get("company"),
             current_price=stock_data.get("quote"),
+            analysis_context=stock_data.get("context"),
         )
         return await self.llm_service.generate(configuration, messages)
 
