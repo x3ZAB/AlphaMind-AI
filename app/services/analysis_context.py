@@ -125,6 +125,11 @@ class ContextHistorical:
     from_date: str | None = None
     to_date: str | None = None
     recent: list[dict[str, Any]] = field(default_factory=list)
+    # Whether historical data was successfully retrieved. ``False`` means the
+    # fetch failed (e.g. provider/network/API error) and no history is present.
+    available: bool = True
+    # Machine-safe reason shown to the LLM when ``available`` is False.
+    reason: str | None = None
 
 
 @dataclass
@@ -206,12 +211,18 @@ def build_analysis_context(
     candles: list[dict[str, Any]] | None,
     *,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    historical_available: bool = True,
+    historical_reason: str | None = None,
 ) -> AnalysisContext:
     """Assemble a structured context from raw stock data.
 
     ``candles`` is a list of ``{"date": "YYYY-MM-DD", "close": float}``
     dicts ordered oldest -> newest. Missing inputs yield ``None`` instead of
     fabricated values.
+
+    ``historical_available`` / ``historical_reason`` let callers surface when
+    the history fetch itself failed (as opposed to returning no data), so the
+    LLM can be told the history is unavailable and the derived metrics are null.
     """
     candles = candles or []
     closes = _closes(candles)
@@ -244,6 +255,8 @@ def build_analysis_context(
         from_date=first_date,
         to_date=last_date,
         recent=candles[-RECENT_CLOSE_LIMIT:],
+        available=historical_available,
+        reason=historical_reason,
     )
 
     return AnalysisContext(

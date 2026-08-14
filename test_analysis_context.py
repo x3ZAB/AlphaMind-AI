@@ -261,6 +261,134 @@ async def test_stock_analysis_service_builds_context() -> None:
     assert result["context"]["historical"]["count"] == 60
 
 
+class FailureInjectionProvider:
+    """A provider that can be told to fail the historical or quote fetch."""
+
+    def __init__(
+        self,
+        *,
+        candle_error: Exception | None = None,
+        quote_error: Exception | None = None,
+    ):
+        self.candle_error = candle_error
+        self.quote_error = quote_error
+
+    async def get_company(self, ticker: str) -> dict:
+        return dict(COMPANY)
+
+    async def get_stock_price(self, ticker: str) -> dict:
+        if self.quote_error is not None:
+            raise self.quote_error
+        return dict(QUOTE)
+
+    async def get_stock_candles(self, ticker, *, lookback_days=250):
+        if self.candle_error is not None:
+            raise self.candle_error
+        return make_candles(60)
+
+    async def search_company(self, query: str) -> dict:
+        return {"result": [{"symbol": query.upper()}]}
+
+
+def _http_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request(
+        "GET",
+        "https://finnhub.io/api/v1/stock/candle",
+    )
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(
+        f"Client error '{status_code}'",
+        request=request,
+        response=response,
+    )
+
+
+def _connect_error() -> httpx.ConnectError:
+    request = httpx.Request(
+        "GET",
+        "https://finnhub.io/api/v1/stock/candle",
+    )
+    return httpx.ConnectError("connection refused", request=request)
+
+
+async def test_historical_success_calculates_metrics() -> None:
+    service = StockAnalysisService(provider=FailureInjectionProvider())
+    result = await service.analyze("NVDA")
+
+    assert result["context"]["historical"]["available"] is True
+    assert result["context"]["historical"]["reason"] is None
+    assert result["context"]["historical"]["count"] == 60
+    metrics = result["context"]["metrics"]
+    assert metrics["sma20"] is not None
+    assert metrics["sma50"] is not None
+    assert metrics["volatility"] is not None
+    assert metrics["period_return"] is not None
+
+
+async def test_historical_403_falls_back_gracefully() -> None:
+    service = StockAnalysisService(
+        provider=FailureInjectionProvider(candle_error=_http_error(403))
+    )
+    result = await service.analyze("NVDA")
+
+    # Current market data is preserved; only history is degraded.
+    assert result["quote"]["c"] == 155.0
+
+    history = result["context"]["historical"]
+    assert history["available"] is False
+    assert history["reason"] == "unavailable"
+    assert history["count"] == 0
+    assert history["recent"] == []
+
+    metrics = result["context"]["metrics"]
+    assert metrics["sma20"] is None
+    assert metrics["sma50"] is None
+    assert metrics["volatility"] is None
+    assert metrics["period_return"] is None
+    assert metrics["distance_from_sma20"] is None
+    assert metrics["distance_from_sma50"] is None
+
+
+async def test_historical_429_falls_back_gracefully() -> None:
+    service = StockAnalysisService(
+        provider=FailureInjectionProvider(candle_error=_http_error(429))
+    )
+    result = await service.analyze("NVDA")
+
+    assert result["quote"]["c"] == 155.0
+    assert result["context"]["historical"]["available"] is False
+    assert result["context"]["historical"]["reason"] == "unavailable"
+    assert result["context"]["metrics"]["sma20"] is None
+    assert result["context"]["metrics"]["period_return"] is None
+
+
+async def test_historical_network_failure_falls_back_gracefully() -> None:
+    service = StockAnalysisService(
+        provider=FailureInjectionProvider(candle_error=_connect_error())
+    )
+    result = await service.analyze("NVDA")
+
+    assert result["quote"]["c"] == 155.0
+    assert result["context"]["historical"]["available"] is False
+    assert result["context"]["historical"]["reason"] == "unavailable"
+    assert result["context"]["metrics"]["volatility"] is None
+
+
+async def test_quote_failure_still_fails_analysis() -> None:
+    service = StockAnalysisService(
+        provider=FailureInjectionProvider(quote_error=_connect_error())
+    )
+
+    try:
+        await service.analyze("NVDA")
+    except httpx.ConnectError:
+        return
+    # Quote (current market data) is required — analysis must not succeed.
+    raise AssertionError(
+        "stock analysis should fail when current quote is unavailable"
+    )
+
+
 class FakeLLMService:
     async def generate(self, configuration, messages, **kwargs) -> str:
         self.received_messages = messages
@@ -356,6 +484,11 @@ async def main() -> None:
     test_llm_receives_structured_analysis_context()
     test_llm_fallback_without_context_still_works()
     await test_stock_analysis_service_builds_context()
+    await test_historical_success_calculates_metrics()
+    await test_historical_403_falls_back_gracefully()
+    await test_historical_429_falls_back_gracefully()
+    await test_historical_network_failure_falls_back_gracefully()
+    await test_quote_failure_still_fails_analysis()
     await test_telegram_analysis_passes_context_to_llm()
     await test_finnhub_candles_are_parsed_oldest_first()
     await test_finnhub_no_data_returns_empty_list()
