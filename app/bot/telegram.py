@@ -1,3 +1,5 @@
+import logging
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -24,6 +26,8 @@ from app.services.telegram_analysis import (
     is_analysis_request,
     user_facing_analysis_error,
 )
+
+logger = logging.getLogger(__name__)
 
 
 SETTINGS_PROVIDER = 1
@@ -193,17 +197,10 @@ async def settings_api_key(
         )
 
     except Exception as error:
-        import traceback
-
-        print(
-            "LLM CONFIGURATION ERROR:",
+        logger.exception(
+            "LLM configuration save failed: %s",
             type(error).__name__,
         )
-        print(
-            "LLM CONFIGURATION ERROR:",
-            str(error),
-        )
-        traceback.print_exc()
 
         await update.message.reply_text(
             "❌ Failed to save LLM configuration.\n"
@@ -241,11 +238,26 @@ async def stock_message(
     if not query:
         return
 
-    try:
-        if is_analysis_request(query):
-            await analysis_message(update, query)
-            return
+    telegram_user = update.effective_user
+    telegram_id = getattr(telegram_user, "id", None)
 
+    db = SessionLocal()
+    has_llm_config = False
+    try:
+        if telegram_id is not None:
+            user = UserRepository(db).get_or_create_by_telegram_id(
+                str(telegram_id),
+            )
+            if user and user.llm_configuration:
+                has_llm_config = True
+    finally:
+        db.close()
+
+    if is_analysis_request(query) or has_llm_config:
+        await analysis_message(update, query)
+        return
+
+    try:
         service = StockAnalysisService()
 
         result = await service.analyze_query(query)
@@ -253,7 +265,7 @@ async def stock_message(
         if result is None:
             await update.message.reply_text(
                 f"❌ I couldn't find a stock matching:\n"
-                f"\"{query}\"\n\n"
+                f'"{query}"\n\n'
                 "Try a company name or ticker like AAPL, Apple, or NVIDIA."
             )
             return
@@ -329,12 +341,44 @@ async def analysis_message(
                 username=username,
             )
 
+        # Log diagnostic info without exposing secrets.
+        if user and user.llm_configuration:
+            config = user.llm_configuration
+            logger.info(
+                "Analysis request: telegram_id=%s provider=%s model=%s "
+                "has_encrypted_key=%s",
+                telegram_id,
+                config.provider,
+                config.model,
+                bool(config.encrypted_api_key),
+            )
+
+            # Verify decryption works without logging the key value.
+            try:
+                decrypted = EncryptionService().decrypt(
+                    config.encrypted_api_key
+                )
+                logger.info(
+                    "API key decryption: success, key_length=%d",
+                    len(decrypted),
+                )
+            except Exception as decrypt_error:
+                logger.error(
+                    "API key decryption FAILED: %s: %s",
+                    type(decrypt_error).__name__,
+                    str(decrypt_error),
+                )
+        else:
+            logger.info(
+                "Analysis request: telegram_id=%s has_config=%s",
+                telegram_id,
+                bool(user and user.llm_configuration),
+            )
+
         service = TelegramAnalysisService(
-            stock_service=StockAnalysisService(),
             llm_service=ConfiguredLLMService(
                 EncryptionService()
             ),
-            analysis_service=LLMAnalysisService(),
         )
 
         response = await service.analyze(
@@ -345,6 +389,13 @@ async def analysis_message(
         await update.message.reply_text(response)
 
     except Exception as error:
+        logger.exception(
+            "Analysis failed for telegram_id=%s request=%r: %s: %s",
+            telegram_id,
+            request,
+            type(error).__name__,
+            str(error),
+        )
         await update.message.reply_text(
             user_facing_analysis_error(error)
         )

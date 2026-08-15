@@ -12,6 +12,22 @@ from app.services.analysis_context import (
 logger = logging.getLogger(__name__)
 
 
+def _historical_failure_reason(error: httpx.HTTPError) -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        status_code = error.response.status_code
+
+        if status_code in {401, 403}:
+            return "access_denied"
+
+        if status_code == 429:
+            return "rate_limited"
+
+    if isinstance(error, httpx.RequestError):
+        return "network_error"
+
+    return "unavailable"
+
+
 class StockAnalysisService:
 
     def __init__(self, provider: BaseProvider | None = None):
@@ -36,13 +52,14 @@ class StockAnalysisService:
             )
         except httpx.HTTPError as exc:
             historical_available = False
-            historical_reason = "unavailable"
+            historical_reason = _historical_failure_reason(exc)
             # Log only the exception class and symbol — never the request URL,
             # which embeds the Finnhub API token, and never the raw payload.
             logger.warning(
-                "Historical candles unavailable for %s: %s",
+                "Historical candles unavailable for %s: %s (%s)",
                 ticker,
                 type(exc).__name__,
+                historical_reason,
             )
 
         context = build_analysis_context(

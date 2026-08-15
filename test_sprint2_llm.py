@@ -11,6 +11,7 @@ from app.llm.errors import LLMProviderError, UnknownLLMProviderError
 from app.llm.manager import LLMManager
 from app.llm.prompts import ALPHAMIND_SYSTEM_PROMPT
 from app.llm.providers.openai import OpenAIProvider
+from app.llm.providers.gemini import GeminiProvider
 from app.llm.registry import LLMProviderRegistry
 from app.llm.service import ConfiguredLLMService
 from app.models import User, UserLLMConfiguration
@@ -115,6 +116,264 @@ async def test_openai_normalization_and_http_error() -> None:
             raise AssertionError("HTTP error did not raise")
 
 
+def _gemini_messages() -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": ALPHAMIND_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": "Question: analyze NVDA",
+        },
+    ]
+
+
+async def test_gemini_uses_system_instruction_and_string_input() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-goog-api-key"] == "secret-key"
+        payload = json.loads(request.content)
+        assert payload["model"] == "gemini-3.1-flash-lite"
+        assert payload["system_instruction"] == ALPHAMIND_SYSTEM_PROMPT
+        assert payload["input"] == "Question: analyze NVDA"
+        assert payload["store"] is True
+        assert "user_input" not in json.dumps(payload)
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "steps": [
+                    {
+                        "type": "model_output",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "  balanced analysis  ",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = GeminiProvider(
+            "secret-key",
+            "gemini-3.1-flash-lite",
+            client=client,
+        )
+        assert await provider.generate(_gemini_messages()) == "balanced analysis"
+
+
+async def test_gemini_output_text_fallback() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "output_text": "  direct output  ",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = GeminiProvider(
+            "secret-key",
+            "gemini-3.1-flash-lite",
+            client=client,
+        )
+        assert await provider.generate(_gemini_messages()) == "direct output"
+
+
+async def test_gemini_http_errors_are_controlled() -> None:
+    secret_key = "super-secret-api-key"
+
+    for status_code in (400, 401, 402, 403, 404, 429):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                status_code,
+                json={"error": "provider failure"},
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = GeminiProvider(
+                secret_key,
+                "gemini-3.1-flash-lite",
+                client=client,
+            )
+            try:
+                await provider.generate(_gemini_messages())
+            except LLMProviderError as exc:
+                assert secret_key not in str(exc)
+                assert f"HTTP {status_code}" in str(exc)
+            else:
+                raise AssertionError(
+                    f"HTTP {status_code} did not raise"
+                )
+
+
+async def test_gemini_network_failure_is_controlled() -> None:
+    secret_key = "super-secret-api-key"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(
+            "connection refused",
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = GeminiProvider(
+            secret_key,
+            "gemini-3.1-flash-lite",
+            client=client,
+        )
+        try:
+            await provider.generate(_gemini_messages())
+        except LLMProviderError as exc:
+            assert secret_key not in str(exc)
+            assert "request failed" in str(exc)
+        else:
+            raise AssertionError("Network failure did not raise")
+
+
+async def test_gemini_invalid_response_is_controlled() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"status": "completed", "steps": []},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = GeminiProvider(
+            "secret-key",
+            "gemini-3.1-flash-lite",
+            client=client,
+        )
+        try:
+            await provider.generate(_gemini_messages())
+        except LLMProviderError as exc:
+            assert "invalid response" in str(exc)
+        else:
+            raise AssertionError("Invalid response did not raise")
+
+
+async def test_gemini_timeout_is_controlled() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("read timed out", request=request)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = GeminiProvider(
+            "secret-key",
+            "gemini-3.1-flash-lite",
+            client=client,
+        )
+        try:
+            await provider.generate(_gemini_messages())
+        except LLMProviderError as exc:
+            assert "timed out" in str(exc)
+        else:
+            raise AssertionError("Timeout did not raise")
+
+
+async def test_gemini_invalid_json_is_controlled() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not valid json")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = GeminiProvider(
+            "secret-key",
+            "gemini-3.1-flash-lite",
+            client=client,
+        )
+        try:
+            await provider.generate(_gemini_messages())
+        except LLMProviderError as exc:
+            assert "invalid JSON" in str(exc)
+        else:
+            raise AssertionError("Invalid JSON did not raise")
+
+
+async def test_openai_http_status_matrix() -> None:
+    secret_key = "super-secret-api-key"
+
+    for status_code in (400, 402, 403, 429):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(status_code, json={"error": "failure"})
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = OpenAIProvider(
+                secret_key,
+                "test-model",
+                client=client,
+            )
+            try:
+                await provider.generate(
+                    [{"role": "user", "content": "hello"}]
+                )
+            except LLMProviderError as exc:
+                assert secret_key not in str(exc)
+                assert f"HTTP {status_code}" in str(exc)
+            else:
+                raise AssertionError(
+                    f"HTTP {status_code} did not raise"
+                )
+
+
+async def test_openai_network_failure_is_controlled() -> None:
+    secret_key = "super-secret-api-key"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(
+            "connection refused",
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = OpenAIProvider(
+            secret_key,
+            "test-model",
+            client=client,
+        )
+        try:
+            await provider.generate(
+                [{"role": "user", "content": "hello"}]
+            )
+        except LLMProviderError as exc:
+            assert secret_key not in str(exc)
+            assert "request failed" in str(exc)
+        else:
+            raise AssertionError("Network failure did not raise")
+
+
+async def test_openai_invalid_response_is_controlled() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": []})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = OpenAIProvider(
+            "secret-key",
+            "test-model",
+            client=client,
+        )
+        try:
+            await provider.generate(
+                [{"role": "user", "content": "hello"}]
+            )
+        except LLMProviderError as exc:
+            assert "invalid response" in str(exc)
+        else:
+            raise AssertionError("Invalid response did not raise")
+
+
 async def test_encryption_manager_integration() -> None:
     encrypted = "ciphertext-only"
     encryption = FakeEncryptionService("decrypted-key")
@@ -193,6 +452,16 @@ async def main() -> None:
     await test_real_encryption_round_trip()
     await test_registry_and_unknown_provider()
     await test_openai_normalization_and_http_error()
+    await test_openai_http_status_matrix()
+    await test_openai_network_failure_is_controlled()
+    await test_openai_invalid_response_is_controlled()
+    await test_gemini_uses_system_instruction_and_string_input()
+    await test_gemini_output_text_fallback()
+    await test_gemini_http_errors_are_controlled()
+    await test_gemini_network_failure_is_controlled()
+    await test_gemini_invalid_response_is_controlled()
+    await test_gemini_timeout_is_controlled()
+    await test_gemini_invalid_json_is_controlled()
     await test_encryption_manager_integration()
     await test_prompt_and_analysis_messages()
     await test_model_registration_and_manager_flow()
