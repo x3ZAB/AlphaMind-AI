@@ -18,7 +18,6 @@ from app.repositories import (
     UserRepository,
 )
 from app.security.encryption import EncryptionService
-from app.services.llm_analysis import LLMAnalysisService
 from app.services.llm_configuration import LLMConfigurationService
 from app.services.stock_analysis import StockAnalysisService
 from app.services.telegram_analysis import (
@@ -386,7 +385,12 @@ async def analysis_message(
             request,
         )
 
-        await update.message.reply_text(response)
+        from app.bot.formatters.financial import FinancialMessageFormatter
+
+        formatter = FinancialMessageFormatter()
+        chunks = formatter.split_message(response)
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
 
     except Exception as error:
         logger.exception(
